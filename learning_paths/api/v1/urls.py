@@ -5,7 +5,9 @@ from rest_framework import routers
 
 from learning_paths.api.v1.views import (
     AllObjectTagsView,
+    BulkEnrollGroupToCourseView,
     BulkEnrollView,
+    GroupCourseAssignmentViewSet,
     LearningPathAsProgramViewSet,
     LearningPathCourseEnrollmentView,
     LearningPathEnrollmentView,
@@ -13,12 +15,14 @@ from learning_paths.api.v1.views import (
     LearningPathUserProgressView,
     LearningPathViewSet,
     ListEnrollmentsView,
+    SyncGroupEnrollmentsView,
 )
 from learning_paths.keys import COURSE_KEY_URL_PATTERN, LEARNING_PATH_URL_PATTERN
 
 router = routers.SimpleRouter()
 router.register(r"programs", LearningPathAsProgramViewSet, basename="learning-path-as-program")
 router.register(r"learning-paths", LearningPathViewSet, basename="learning-path")
+router.register(r"group-course-assignments", GroupCourseAssignmentViewSet, basename="group-course-assignment")
 
 urlpatterns = router.urls + [
     re_path(
@@ -55,5 +59,15 @@ urlpatterns = router.urls + [
         "all_object_tags/",
         AllObjectTagsView.as_view(),
         name="all-object-tags",
+    ),
+    path(
+        "group-enrollments/bulk-enroll/",
+        BulkEnrollGroupToCourseView.as_view(),
+        name="group-bulk-enroll",
+    ),
+    path(
+        "group-enrollments/sync/",
+        SyncGroupEnrollmentsView.as_view(),
+        name="group-enrollment-sync",
     ),
 ]

@@ -58,8 +58,18 @@ def get_course_dates(course_key: CourseKey) -> tuple[datetime | None, datetime |
         return None, None
 
 
-def enroll_user_in_course(user: AbstractBaseUser, course_key: CourseKey) -> bool:
-    """Enroll a user in a course."""
+def enroll_user_in_course(user: AbstractBaseUser, course_key: CourseKey, mode: str = "audit") -> bool:
+    """
+    Enroll a user in a course.
+
+    Args:
+        user: The user to enroll.
+        course_key: The course to enroll the user in.
+        mode: The enrollment mode (default: "audit"). Options: audit, verified, professional, etc.
+
+    Returns:
+        bool: True if enrollment succeeded or user is already enrolled, False otherwise.
+    """
     # pylint: disable=import-outside-toplevel, import-error
     from common.djangoapps.student.api import CourseEnrollment
     from common.djangoapps.student.models.course_enrollment import (
@@ -67,8 +77,19 @@ def enroll_user_in_course(user: AbstractBaseUser, course_key: CourseKey) -> bool
     )
 
     try:
-        CourseEnrollment.enroll(user, course_key)
+        # Check if user is already enrolled
+        existing_enrollment = CourseEnrollment.get_enrollment(user, course_key)
+        if existing_enrollment and existing_enrollment.is_active:
+            log.debug("User %s is already enrolled in course %s", user.username, course_key)
+            return False  # Already enrolled, no new enrollment created
+
+        # Enroll the user with the specified mode
+        CourseEnrollment.enroll(user, course_key, mode=mode, check_access=True)
+        log.info("Successfully enrolled user %s in course %s with mode %s", user.username, course_key, mode)
         return True
     except CourseEnrollmentException as exc:
-        log.exception("Failed to enroll user %s in course %s: %s", user, course_key, exc)
+        log.exception("Failed to enroll user %s in course %s: %s", user.username, course_key, exc)
+        return False
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Unexpected error enrolling user %s in course %s: %s", user.username, course_key, exc)
         return False
