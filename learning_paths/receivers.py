@@ -149,41 +149,55 @@ def auto_enroll_on_group_membership_change(sender, instance, action, pk_set, **k
 
     Args:
         sender: The intermediate model for the ManyToMany relation.
-        instance: The Group instance.
+        instance: Either a Group instance (when adding users to group) or User instance (when adding groups to user).
         action: The type of update ("pre_add", "post_add", "pre_remove", "post_remove").
-        pk_set: Set of primary keys of User instances being added/removed.
+        pk_set: Set of primary keys being added/removed (User PKs or Group PKs depending on which side triggered).
     """
+    from django.contrib.auth import get_user_model
     from learning_paths.compat import enroll_user_in_course
 
-    # Only act on post_add (after users are added to the group)
+    # Only act on post_add (after relationship is created)
     if action != "post_add":
         return
 
-    # Get active course assignments for this group with auto_enroll enabled
+    User = get_user_model()
+
+    # Determine if instance is a Group or User
+    # When adding users to a group: instance=Group, pk_set=User IDs
+    # When adding groups to a user: instance=User, pk_set=Group IDs
+    if isinstance(instance, Group):
+        # Adding users to a group
+        groups = [instance]
+        users = User.objects.filter(pk__in=pk_set)
+    elif isinstance(instance, User):
+        # Adding groups to a user
+        groups = Group.objects.filter(pk__in=pk_set)
+        users = [instance]
+    else:
+        logger.warning(
+            "[GroupEnrollment] Unexpected instance type in m2m_changed signal: %s",
+            type(instance).__name__,
+        )
+        return
+
+    # Get active course assignments for these groups with auto_enroll enabled
     assignments = GroupCourseAssignment.objects.filter(
-        group=instance,
+        group__in=groups,
         is_active=True,
         auto_enroll=True,
     )
 
     if not assignments.exists():
         logger.debug(
-            "[GroupEnrollment] No active auto-enroll assignments for group %s. Skipping auto-enrollment.",
-            instance.name,
+            "[GroupEnrollment] No active auto-enroll assignments for groups. Skipping auto-enrollment.",
         )
         return
 
-    # Get the User model
-    from django.contrib.auth import get_user_model
-
-    User = get_user_model()
-    users = User.objects.filter(pk__in=pk_set)
-
     logger.info(
-        "[GroupEnrollment] Auto-enrolling %d users added to group %s into %d courses.",
-        users.count(),
-        instance.name,
+        "[GroupEnrollment] Auto-enrolling %d users into %d courses via %d group(s).",
+        len(users) if isinstance(users, list) else users.count(),
         assignments.count(),
+        len(groups),
     )
 
     enrollments_created = 0
@@ -200,7 +214,7 @@ def auto_enroll_on_group_membership_change(sender, instance, action, pk_set, **k
                     user=user,
                     enrolled_by=user,  # Auto-enrollment, so user enrolls themselves
                     status=GroupCourseEnrollmentAudit.SUCCESS if success else GroupCourseEnrollmentAudit.SKIPPED,
-                    reason=f"Auto-enrollment via group membership in {instance.name}",
+                    reason=f"Auto-enrollment via group membership in {assignment.group.name}",
                 )
 
                 if success:
@@ -220,7 +234,7 @@ def auto_enroll_on_group_membership_change(sender, instance, action, pk_set, **k
                     enrolled_by=user,
                     status=GroupCourseEnrollmentAudit.FAILED,
                     error_message=str(e),
-                    reason=f"Auto-enrollment via group membership in {instance.name}",
+                    reason=f"Auto-enrollment via group membership in {assignment.group.name}",
                 )
 
     logger.info(
