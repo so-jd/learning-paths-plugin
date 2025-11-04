@@ -1,0 +1,96 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrahead %}
+{{ block.super }}
+<style>
+    .form-row {
+        margin-bottom: 20px;
+    }
+    .helptext {
+        color: #666;
+        font-size: 0.9em;
+        margin-top: 5px;
+    }
+    .submit-row {
+        padding: 12px 20px;
+        background: #f8f8f8;
+        border-top: 1px solid #e0e0e0;
+    }
+</style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% trans 'Home' %}</a>
+    &rsaquo; <a href="{% url 'admin:auth_group_changelist' %}">{% trans 'Groups' %}</a>
+    &rsaquo; <a href="{% url 'admin:auth_group_change' group.pk %}">{{ group.name }}</a>
+    &rsaquo; {% trans 'Bulk Add Users' %}
+</div>
+{% endblock %}
+
+{% block content %}
+<h1>Bulk Add Users to "{{ group.name }}"</h1>
+
+<p>
+    Add multiple users to this group by entering their usernames or email addresses below.
+    You can separate entries with newlines, commas, or spaces.
+</p>
+
+<form method="post">
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+        <div class="errornote">
+            {{ form.non_field_errors }}
+        </div>
+    {% endif %}
+
+    <div class="form-row">
+        <div>
+            <label for="{{ form.users_input.id_for_label }}">
+                {{ form.users_input.label }}:
+            </label>
+
+            {% if form.users_input.errors %}
+                <ul class="errorlist">
+                    {% for error in form.users_input.errors %}
+                        <li>{{ error }}</li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+
+            {{ form.users_input }}
+
+            {% if form.users_input.help_text %}
+                <p class="helptext">{{ form.users_input.help_text }}</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="form-row">
+        <p class="help">
+            <strong>Examples:</strong><br>
+            <code>
+                john.doe<br>
+                jane.smith<br>
+                alice@example.com, bob@example.com
+            </code>
+        </p>
+    </div>
+
+    <div class="submit-row">
+        <input type="submit" value="Add Users to Group" class="default" />
+        <a href="{% url 'admin:auth_group_change' group.pk %}" class="button cancel-link">Cancel</a>
+    </div>
+</form>
+
+<div style="margin-top: 30px; padding: 15px; background: #f0f0f0; border-left: 4px solid #417690;">
+    <h3>Current Group Statistics</h3>
+    <ul>
+        <li><strong>Group Name:</strong> {{ group.name }}</li>
+        <li><strong>Current Members:</strong> {{ group.user_set.count }}</li>
+        <li><strong>Permissions:</strong> {{ group.permissions.count }}</li>
+    </ul>
+</div>
+{% endblock %}

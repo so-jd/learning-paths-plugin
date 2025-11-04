@@ -6,9 +6,11 @@ import os
 
 from django import forms
 from django.contrib import admin, auth, messages
+from django.contrib.auth.admin import GroupAdmin as BaseGroupAdmin
+from django.contrib.auth.models import Group
 from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
-from django.db import transaction
+from django.db import models, transaction
 from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
@@ -628,3 +630,128 @@ class GroupCourseEnrollmentAuditAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         """Disable deletion of audit records."""
         return False
+
+
+class BulkAddUsersToGroupForm(forms.Form):
+    """Form to bulk add users to a group by username or email."""
+
+    users_input = forms.CharField(
+        widget=forms.Textarea(attrs={"rows": 10, "cols": 80}),
+        help_text="Enter usernames or emails separated by newlines, commas, or spaces",
+        label="Usernames or Emails",
+        required=True,
+    )
+
+    def __init__(self, *args, **kwargs):
+        self.group = kwargs.pop("group", None)
+        super().__init__(*args, **kwargs)
+
+    def clean_users_input(self):
+        """Parse and validate usernames/emails."""
+        import re
+
+        data = self.cleaned_data["users_input"]
+        if not data:
+            return []
+
+        # Split by newlines, commas, or multiple spaces
+        identifiers = re.split(r"[\n,\s]+", data.strip())
+        identifiers = [i.strip() for i in identifiers if i.strip()]
+
+        if not identifiers:
+            raise ValidationError("Please provide at least one username or email.")
+
+        # Try to find users by username or email
+        users = []
+        not_found = []
+
+        for identifier in identifiers:
+            user = User.objects.filter(models.Q(username=identifier) | models.Q(email=identifier)).first()
+            if user:
+                users.append(user)
+            else:
+                not_found.append(identifier)
+
+        if not_found:
+            raise ValidationError(
+                f"The following {len(not_found)} user(s) were not found: {', '.join(not_found[:10])}"
+                + (f" and {len(not_found) - 10} more..." if len(not_found) > 10 else "")
+            )
+
+        return users
+
+
+class GroupCourseAssignmentInline(admin.TabularInline):
+    """Inline display of course assignments for a group."""
+
+    model = GroupCourseAssignment
+    fk_name = "group"  # Explicitly specify the foreign key field
+    extra = 0
+    fields = ["course_id", "enrollment_mode", "auto_enroll", "is_active", "assigned_by", "created"]
+    readonly_fields = ["assigned_by", "created"]
+    can_delete = True
+
+    def has_add_permission(self, request, obj=None):
+        """Allow adding assignments from the group admin."""
+        return True
+
+
+class EnhancedGroupAdmin(DjangoObjectActions, BaseGroupAdmin):
+    """Enhanced Group Admin with bulk user management and course assignments."""
+
+    change_actions = ("bulk_add_users", "view_course_assignments")
+
+    # Declare inlines as a class attribute (the standard Django way)
+    inlines = [GroupCourseAssignmentInline]
+
+    @action(label="Bulk Add Users", description="Add multiple users to this group at once")
+    def bulk_add_users(self, request, obj: Group):
+        """Bulk add users to a group."""
+        from django.shortcuts import render
+
+        if request.method == "POST":
+            form = BulkAddUsersToGroupForm(request.POST, group=obj)
+            if form.is_valid():
+                users = form.cleaned_data["users_input"]
+                added_count = 0
+
+                for user in users:
+                    if not obj.user_set.filter(pk=user.pk).exists():
+                        obj.user_set.add(user)
+                        added_count += 1
+
+                messages.success(
+                    request,
+                    f"Successfully added {added_count} user(s) to group '{obj.name}'. "
+                    f"{len(users) - added_count} were already members.",
+                )
+                return HttpResponseRedirect(reverse("admin:auth_group_change", args=[obj.pk]))
+        else:
+            form = BulkAddUsersToGroupForm(group=obj)
+
+        context = {
+            "form": form,
+            "group": obj,
+            "opts": self.model._meta,
+            "title": f"Bulk Add Users to {obj.name}",
+        }
+        return render(request, "admin/learning_paths/bulk_add_users.html", context)
+
+    @action(label="View Course Assignments", description="View and manage course assignments for this group")
+    def view_course_assignments(self, request, obj: Group):
+        """Redirect to course assignments filtered by this group."""
+        url = reverse("admin:learning_paths_groupcourseassignment_changelist")
+        return HttpResponseRedirect(f"{url}?group__id__exact={obj.pk}")
+
+    def get_member_count(self, obj):
+        """Display the number of users in the group."""
+        return obj.user_set.count()
+
+    get_member_count.short_description = "Members"
+
+    list_display = BaseGroupAdmin.list_display + ("get_member_count",)
+
+
+# Unregister the default Group admin and register our enhanced version
+admin.site.unregister(Group)
+admin.site.register(Group, EnhancedGroupAdmin)
