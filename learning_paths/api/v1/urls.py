@@ -4,6 +4,7 @@ from django.urls import path, re_path
 from rest_framework import routers
 
 from learning_paths.api.v1.views import (
+    AllObjectTagsView,
     BulkEnrollView,
     LearningPathAsProgramViewSet,
     LearningPathCourseEnrollmentView,
@@ -49,5 +50,10 @@ urlpatterns = router.urls + [
         rf"{LEARNING_PATH_URL_PATTERN}/enrollments/{COURSE_KEY_URL_PATTERN}/",
         LearningPathCourseEnrollmentView.as_view(),
         name="learning-path-course-enroll",
+    ),
+    path(
+        "all_object_tags/",
+        AllObjectTagsView.as_view(),
+        name="all-object-tags",
     ),
 ]
