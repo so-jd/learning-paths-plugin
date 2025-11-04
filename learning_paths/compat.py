@@ -93,3 +93,39 @@ def enroll_user_in_course(user: AbstractBaseUser, course_key: CourseKey, mode: s
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Unexpected error enrolling user %s in course %s: %s", user.username, course_key, exc)
         return False
+
+
+def unenroll_user_from_course(user: AbstractBaseUser, course_key: CourseKey) -> bool:
+    """
+    Unenroll a user from a course.
+
+    Args:
+        user: The user to unenroll.
+        course_key: The course to unenroll the user from.
+
+    Returns:
+        bool: True if unenrollment succeeded, False otherwise.
+    """
+    # pylint: disable=import-outside-toplevel, import-error
+    from common.djangoapps.student.api import CourseEnrollment
+    from common.djangoapps.student.models.course_enrollment import (
+        CourseEnrollmentException,
+    )
+
+    try:
+        # Check if user is enrolled
+        existing_enrollment = CourseEnrollment.get_enrollment(user, course_key)
+        if not existing_enrollment or not existing_enrollment.is_active:
+            log.debug("User %s is not enrolled in course %s", user.username, course_key)
+            return False  # Not enrolled, nothing to do
+
+        # Unenroll the user
+        CourseEnrollment.unenroll(user, course_key)
+        log.info("Successfully unenrolled user %s from course %s", user.username, course_key)
+        return True
+    except CourseEnrollmentException as exc:
+        log.exception("Failed to unenroll user %s from course %s: %s", user.username, course_key, exc)
+        return False
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Unexpected error unenrolling user %s from course %s: %s", user.username, course_key, exc)
+        return False

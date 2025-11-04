@@ -536,9 +536,11 @@ class GroupCourseEnrollmentAudit(TimeStampedModel):
 
     assignment = models.ForeignKey(
         GroupCourseAssignment,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="enrollment_audits",
-        help_text=_("The group course assignment that triggered this enrollment."),
+        help_text=_("The group course assignment that triggered this enrollment (null if assignment was deleted)."),
     )
     user = models.ForeignKey(
         User,

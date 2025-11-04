@@ -605,13 +605,27 @@ class GroupCourseEnrollmentAuditAdmin(admin.ModelAdmin):
 
     def get_group_name(self, obj):
         """Get the group name from the assignment."""
-        return obj.assignment.group.name if obj.assignment else "-"
+        if obj.assignment:
+            return obj.assignment.group.name
+        # Try to extract from reason field if assignment was deleted
+        if "group-course assignment:" in obj.reason:
+            import re
+            match = re.search(r'assignment: (.+?) →', obj.reason)
+            return match.group(1) if match else "[Deleted Assignment]"
+        return "[Deleted Assignment]"
 
     get_group_name.short_description = "Group"
 
     def get_course_id(self, obj):
         """Get the course ID from the assignment."""
-        return str(obj.assignment.course_id) if obj.assignment else "-"
+        if obj.assignment:
+            return str(obj.assignment.course_id)
+        # Try to extract from reason field if assignment was deleted
+        if "→" in obj.reason:
+            import re
+            match = re.search(r'→ (.+?)(?:\s|$)', obj.reason)
+            return match.group(1) if match else "[Deleted Assignment]"
+        return "[Deleted Assignment]"
 
     get_course_id.short_description = "Course"
 

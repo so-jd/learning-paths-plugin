@@ -200,8 +200,10 @@ class Migration(migrations.Migration):
                 (
                     "assignment",
                     models.ForeignKey(
-                        help_text="The group course assignment that triggered this enrollment.",
-                        on_delete=django.db.models.deletion.CASCADE,
+                        blank=True,
+                        help_text="The group course assignment that triggered this enrollment (null if assignment was deleted).",
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
                         related_name="enrollment_audits",
                         to="learning_paths.groupcourseassignment",
                     ),

@@ -14,6 +14,14 @@ class LearningPathsConfig(AppConfig):
     name = "learning_paths"
     verbose_name = "Learning Paths"
 
+    def ready(self):
+        """
+        Connect signal handlers when the app is ready.
+        """
+        # Import receivers to ensure signal handlers are registered
+        # This is needed for @receiver decorators to work
+        from learning_paths import receivers  # noqa: F401
+
     plugin_app = {
         # Configuration setting for Plugin URLs for this app.
         PluginURLs.CONFIG: {
@@ -43,10 +51,15 @@ class LearningPathsConfig(AppConfig):
                 PluginSignals.RELATIVE_PATH: "receivers",
                 PluginSignals.RECEIVERS: [
                     {
+                        # This signal is registered via PluginSignals because it was here originally
                         PluginSignals.RECEIVER_FUNC_NAME: "process_pending_enrollments",
                         PluginSignals.SIGNAL_PATH: "django.db.models.signals.post_save",
                         PluginSignals.SENDER_PATH: "django.contrib.auth.models.User",
-                    }
+                    },
+                    # Note: Other signal handlers (auto_enroll_on_group_membership_change,
+                    # auto_unenroll_on_assignment_deletion, create_enrollment_audit,
+                    # create_enrollment_allowed_audit) are registered via @receiver decorators
+                    # in receivers.py and are connected via the ready() method above.
                 ],
             }
         },
