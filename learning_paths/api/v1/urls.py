@@ -7,6 +7,7 @@ from learning_paths.api.v1.views import (
     AllObjectTagsView,
     BulkEnrollGroupToCourseView,
     BulkEnrollView,
+    CoursePrerequisitesView,
     GroupCourseAssignmentViewSet,
     LearningPathAsProgramViewSet,
     LearningPathCourseEnrollmentView,
@@ -69,5 +70,10 @@ urlpatterns = router.urls + [
         "group-enrollments/sync/",
         SyncGroupEnrollmentsView.as_view(),
         name="group-enrollment-sync",
+    ),
+    re_path(
+        rf"courses/{COURSE_KEY_URL_PATTERN}/prerequisites/$",
+        CoursePrerequisitesView.as_view(),
+        name="course-prerequisites",
     ),
 ]
