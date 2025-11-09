@@ -325,3 +325,145 @@ def auto_unenroll_on_assignment_deletion(sender, instance, **kwargs):
         unenrollments_successful,
         unenrollments_failed,
     )
+
+
+# ============================================================================
+# Course Completion Milestone Fulfillment
+# ============================================================================
+
+
+def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
+    """
+    Automatically fulfill course milestone when a user completes course blocks.
+
+    This signal handler is triggered when a BlockCompletion is saved.
+    It checks if completion represents course-level completion and fulfills
+    the course milestone for prerequisite tracking.
+
+    Args:
+        sender: The BlockCompletion model class
+        instance: The BlockCompletion instance being saved
+        created: Boolean indicating if this is a new completion
+        **kwargs: Additional signal parameters
+    """
+    # Only process when completion reaches 1.0 (fully complete)
+    if instance.completion < 1.0:
+        return
+
+    user = instance.user
+    block_key = instance.block_key
+    course_key = block_key.course_key
+
+    # Check if milestones are available and enabled
+    try:
+        from common.djangoapps.util import milestones_helpers
+    except ImportError:
+        logger.warning("[Milestones] Milestones framework not available")
+        return
+
+    if not milestones_helpers.is_prerequisite_courses_enabled():
+        return
+
+    # Step 1: Check course completion
+    completion_percent = 0
+    try:
+        from lms.djangoapps.courseware.courses import get_course_blocks_completion_summary
+
+        summary = get_course_blocks_completion_summary(course_key, user)
+        if summary:
+            complete_count = summary.get("complete_count", 0)
+            incomplete_count = summary.get("incomplete_count", 0)
+            locked_count = summary.get("locked_count", 0)
+            num_total_units = complete_count + incomplete_count + locked_count
+
+            if num_total_units > 0:
+                completion_percent = round(complete_count / num_total_units, 2) * 100
+
+    except Exception as e:
+        logger.error(
+            "[Milestones] Error checking completion for user %s in course %s: %s",
+            user.username, course_key, str(e)
+        )
+        return
+
+    # Step 2: Check if user has passing grade
+    has_passing_grade = False
+    grade_percent = 0
+    try:
+        from lms.djangoapps.grades.api import CourseGradeFactory
+        from openedx.core.djangoapps.content.course_overviews.api import get_course_overview_or_none
+
+        course_overview = get_course_overview_or_none(course_key)
+        if course_overview:
+            course_grade = CourseGradeFactory().read(user, course_overview)
+            if course_grade:
+                grade_percent = course_grade.percent * 100
+                has_passing_grade = course_grade.passed
+
+    except Exception as e:
+        logger.error(
+            "[Milestones] Error checking grade for user %s in course %s: %s",
+            user.username, course_key, str(e)
+        )
+        return
+
+    # Step 3: Evaluate eligibility (require ≥95% completion AND passing grade)
+    MIN_COMPLETION_PERCENT = 95.0
+    if completion_percent < MIN_COMPLETION_PERCENT:
+        return
+
+    if not has_passing_grade:
+        return
+
+    # Step 4: Fulfill the milestone
+    # Note: The milestones framework handles duplicate fulfillment gracefully
+    try:
+        milestones_helpers.fulfill_course_milestone(course_key, user)
+        logger.info(
+            "[Milestones] Fulfilled milestone for user %s in course %s (completion: %.1f%%, grade: %.1f%%)",
+            user.username,
+            course_key,
+            completion_percent,
+            grade_percent,
+        )
+    except Exception as e:
+        logger.error(
+            "[Milestones] Error fulfilling milestone for user %s in course %s: %s",
+            user.username,
+            course_key,
+            str(e)
+        )
+
+
+# ============================================================================
+# Manual Signal Connection
+# ============================================================================
+
+
+def connect_completion_signal():
+    """
+    Connect the block completion signal handler.
+
+    Manually connects to the BlockCompletion post_save signal to fulfill
+    course milestones when users complete course content. The handler will
+    evaluate if the entire course is complete and if the user has a passing
+    grade before fulfilling the milestone.
+    """
+    try:
+        from completion.models import BlockCompletion
+        from django.db.models.signals import post_save
+
+        post_save.connect(
+            fulfill_milestone_on_block_completion,
+            sender=BlockCompletion,
+            dispatch_uid='learning_paths_fulfill_milestone_on_block_completion',
+        )
+        logger.info("[Milestones] Connected BlockCompletion signal handler")
+    except ImportError:
+        logger.warning("[Milestones] BlockCompletion model not available")
+    except Exception as e:
+        logger.error("[Milestones] Error connecting BlockCompletion signal: %s", str(e))
+
+
+# Auto-connect the signal when this module is imported
+connect_completion_signal()
