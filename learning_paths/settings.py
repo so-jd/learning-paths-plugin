@@ -22,3 +22,9 @@ def plugin_settings(settings: Settings):
         'LEARNING_PATHS_MILESTONE_MODE',
         'async'
     )
+
+    settings.LEARNING_PATHS_MILESTONE_USE_ON_COMMIT = getattr(
+        settings,
+        'LEARNING_PATHS_MILESTONE_USE_ON_COMMIT',
+        True  # Default: enabled for production safety
+    )

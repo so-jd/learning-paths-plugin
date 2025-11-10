@@ -5,7 +5,7 @@
 import logging
 
 from django.contrib.auth.models import Group
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models.signals import m2m_changed, post_delete, post_save
 from django.dispatch import receiver
 
@@ -332,14 +332,102 @@ def auto_unenroll_on_assignment_deletion(sender, instance, **kwargs):
 # ============================================================================
 
 
+def _execute_milestone_check_sync(user_id, course_key_str):
+    """
+    Execute milestone check synchronously (called by on_commit callback).
+
+    This function is executed AFTER the BlockCompletion transaction commits,
+    ensuring data consistency and preventing race conditions.
+
+    Args:
+        user_id: The user ID who completed the block
+        course_key_str: String representation of the course key
+    """
+    try:
+        from django.contrib.auth import get_user_model
+        from learning_paths.tasks import check_and_fulfill_course_milestone
+
+        User = get_user_model()
+        user = User.objects.get(id=user_id)
+
+        result = check_and_fulfill_course_milestone(user_id, course_key_str)
+
+        if result['success']:
+            logger.info(
+                "[Milestones] Fulfilled milestone for user %s in course %s "
+                "(completion: %.1f%%, grade: %.1f%%) [sync+on_commit]",
+                user.username,
+                course_key_str,
+                result['completion_percent'],
+                result['grade_percent'],
+            )
+        else:
+            logger.debug(
+                "[Milestones] Skipped milestone for user %s in course %s: %s [sync+on_commit]",
+                user.username, course_key_str, result['reason']
+            )
+    except Exception as e:
+        logger.error(
+            "[Milestones] Error in sync milestone check for course %s: %s",
+            course_key_str, str(e)
+        )
+
+
+def _enqueue_milestone_task_async(user_id, course_key_str):
+    """
+    Enqueue milestone task asynchronously (called by on_commit callback).
+
+    This function is executed AFTER the BlockCompletion transaction commits,
+    ensuring that the Celery task is only enqueued if the transaction succeeds.
+
+    No artificial countdown delay is needed since the transaction has already
+    committed when this executes.
+
+    Args:
+        user_id: The user ID who completed the block
+        course_key_str: String representation of the course key
+    """
+    try:
+        from django.contrib.auth import get_user_model
+        from learning_paths.tasks import fulfill_course_milestone_task
+
+        User = get_user_model()
+        user = User.objects.get(id=user_id)
+
+        fulfill_course_milestone_task.apply_async(
+            args=[user_id, course_key_str],
+            # No countdown needed - transaction already committed!
+        )
+        logger.info(
+            "[Milestones] Dispatched milestone task for user %s in course %s [async+on_commit]",
+            user.username, course_key_str
+        )
+    except Exception as e:
+        logger.error(
+            "[Milestones] Error dispatching milestone task for course %s: %s",
+            course_key_str, str(e)
+        )
+
+
 def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
     """
     Signal handler that processes milestone fulfillment.
 
-    This handler is triggered when a BlockCompletion is saved. Depending on the
-    LEARNING_PATHS_MILESTONE_MODE setting, it either:
-    - 'async': Dispatches to a Celery task (production mode)
-    - 'sync': Executes inline in the Django process (development/testing mode)
+    This handler is triggered when a BlockCompletion is saved. It uses
+    transaction.on_commit() to defer processing until AFTER the transaction
+    commits, ensuring data consistency and preventing race conditions.
+
+    Behavior based on LEARNING_PATHS_MILESTONE_MODE setting:
+    - 'async' (DEFAULT): Enqueues Celery task after transaction commits
+    - 'sync': Executes milestone check after transaction commits
+
+    The transaction.on_commit() approach provides:
+    - No race conditions (task runs after commit)
+    - Rollback safety (task not enqueued if transaction rolls back)
+    - Faster transactions (no I/O during transaction)
+    - Better performance (no artificial countdown delay needed)
+
+    See docs/ASYNC_APPROACHES_COMPARISON.md for detailed explanation.
 
     Args:
         sender: The BlockCompletion model class
@@ -380,60 +468,112 @@ def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
     if not prereqs_enabled:
         return
 
-    # Check execution mode setting
+    # Check execution mode and on_commit settings
     from django.conf import settings
     execution_mode = getattr(settings, 'LEARNING_PATHS_MILESTONE_MODE', 'async')
+    use_on_commit = getattr(settings, 'LEARNING_PATHS_MILESTONE_USE_ON_COMMIT', True)
 
-    logger.info(
-        "[Milestones] Execution mode: %s for user %s in course %s",
+    logger.debug(
+        "[Milestones] Execution mode: %s, use_on_commit: %s for user %s in course %s",
         execution_mode,
+        use_on_commit,
         user.username,
         course_key
     )
 
+    # Prepare arguments for deferred execution
+    user_id = user.id
+    course_key_str = str(course_key)
+
     if execution_mode == 'sync':
-        # Execute synchronously in Django process
-        try:
-            from learning_paths.tasks import check_and_fulfill_course_milestone
-
-            result = check_and_fulfill_course_milestone(user.id, str(course_key))
-
-            if result['success']:
-                logger.info(
-                    "[Milestones] Fulfilled milestone for user %s in course %s (completion: %.1f%%, grade: %.1f%%) [sync]",
-                    user.username,
-                    course_key,
-                    result['completion_percent'],
-                    result['grade_percent'],
-                )
-            else:
-                logger.debug(
-                    "[Milestones] Skipped milestone for user %s in course %s: %s [sync]",
-                    user.username, course_key, result['reason']
-                )
-        except Exception as e:
-            logger.error(
-                "[Milestones] Error in sync milestone check for user %s in course %s: %s",
-                user.username, course_key, str(e)
+        # SYNC MODE: Execute milestone check inline
+        if use_on_commit:
+            # PRODUCTION-SAFE: Execute after transaction commits
+            # This prevents long-running operations (grade calculation) from
+            # blocking the BlockCompletion transaction
+            transaction.on_commit(
+                lambda: _execute_milestone_check_sync(user_id, course_key_str)
             )
-    else:
-        # Execute asynchronously via Celery worker (default)
-        try:
-            from learning_paths.tasks import fulfill_course_milestone_task
-
-            fulfill_course_milestone_task.apply_async(
-                args=[user.id, str(course_key)],
-                countdown=5,  # Wait 5 seconds to allow completion data to propagate
-            )
-            logger.info(
-                "[Milestones] Dispatched milestone task for user %s in course %s [async]",
+            logger.debug(
+                "[Milestones] Registered on_commit callback for sync milestone check "
+                "(user: %s, course: %s)",
                 user.username, course_key
             )
-        except Exception as e:
-            logger.error(
-                "[Milestones] Error dispatching milestone task for user %s in course %s: %s",
-                user.username, course_key, str(e)
+        else:
+            # LEGACY MODE: Execute immediately (NOT RECOMMENDED)
+            # This runs expensive operations (grade calculation) INSIDE the transaction
+            # Can cause performance issues and deadlocks under load
+            logger.warning(
+                "[Milestones] Using legacy sync mode without on_commit "
+                "(not recommended for production)"
             )
+            try:
+                from learning_paths.tasks import check_and_fulfill_course_milestone
+
+                result = check_and_fulfill_course_milestone(user_id, course_key_str)
+
+                if result['success']:
+                    logger.info(
+                        "[Milestones] Fulfilled milestone for user %s in course %s "
+                        "(completion: %.1f%%, grade: %.1f%%) [sync-legacy]",
+                        user.username,
+                        course_key,
+                        result['completion_percent'],
+                        result['grade_percent'],
+                    )
+                else:
+                    logger.debug(
+                        "[Milestones] Skipped milestone for user %s in course %s: %s [sync-legacy]",
+                        user.username, course_key, result['reason']
+                    )
+            except Exception as e:
+                logger.error(
+                    "[Milestones] Error in legacy sync milestone check for user %s in course %s: %s",
+                    user.username, course_key, str(e)
+                )
+    else:
+        # ASYNC MODE (DEFAULT): Enqueue Celery task
+        if use_on_commit:
+            # PRODUCTION-SAFE: Enqueue task after transaction commits
+            # Benefits:
+            # - No race conditions (transaction already committed)
+            # - Rollback safety (task not enqueued if rollback)
+            # - Faster execution (no artificial countdown delay)
+            # - Cleaner transactions (no message broker I/O during transaction)
+            transaction.on_commit(
+                lambda: _enqueue_milestone_task_async(user_id, course_key_str)
+            )
+            logger.debug(
+                "[Milestones] Registered on_commit callback for async milestone task "
+                "(user: %s, course: %s)",
+                user.username, course_key
+            )
+        else:
+            # LEGACY MODE: Enqueue immediately with countdown delay
+            # Uses countdown=5 to mitigate race conditions, but this means:
+            # - 5-second artificial delay before task executes
+            # - Small race condition risk if transaction takes >5 seconds
+            # - Task enqueued even if transaction rolls back
+            logger.warning(
+                "[Milestones] Using legacy async mode with countdown "
+                "(consider enabling LEARNING_PATHS_MILESTONE_USE_ON_COMMIT)"
+            )
+            try:
+                from learning_paths.tasks import fulfill_course_milestone_task
+
+                fulfill_course_milestone_task.apply_async(
+                    args=[user_id, course_key_str],
+                    countdown=5,  # Artificial delay to allow transaction to commit
+                )
+                logger.info(
+                    "[Milestones] Dispatched milestone task for user %s in course %s [async-legacy]",
+                    user.username, course_key
+                )
+            except Exception as e:
+                logger.error(
+                    "[Milestones] Error dispatching milestone task for user %s in course %s: %s",
+                    user.username, course_key, str(e)
+                )
 
 
 # ============================================================================
