@@ -13,3 +13,12 @@ def plugin_settings(settings: Settings):
     # action. Learners cannot un-enroll themselves.
     # Set this True, if the learners should be allowed to un-enroll themselves.
     settings.LEARNING_PATHS_ALLOW_SELF_UNENROLLMENT = False
+
+    # Milestone fulfillment execution mode
+    # - 'async': Use Celery workers (recommended for production)
+    # - 'sync': Execute inline in Django process (useful for development/testing)
+    settings.LEARNING_PATHS_MILESTONE_MODE = getattr(
+        settings,
+        'LEARNING_PATHS_MILESTONE_MODE',
+        'async'
+    )

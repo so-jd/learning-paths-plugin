@@ -334,11 +334,12 @@ def auto_unenroll_on_assignment_deletion(sender, instance, **kwargs):
 
 def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
     """
-    Automatically fulfill course milestone when a user completes course blocks.
+    Signal handler that processes milestone fulfillment.
 
-    This signal handler is triggered when a BlockCompletion is saved.
-    It checks if completion represents course-level completion and fulfills
-    the course milestone for prerequisite tracking.
+    This handler is triggered when a BlockCompletion is saved. Depending on the
+    LEARNING_PATHS_MILESTONE_MODE setting, it either:
+    - 'async': Dispatches to a Celery task (production mode)
+    - 'sync': Executes inline in the Django process (development/testing mode)
 
     Args:
         sender: The BlockCompletion model class
@@ -346,6 +347,12 @@ def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
         created: Boolean indicating if this is a new completion
         **kwargs: Additional signal parameters
     """
+    logger.debug(
+        "[Milestones] Signal fired for block %s, completion=%.2f",
+        instance.block_key,
+        instance.completion
+    )
+
     # Only process when completion reaches 1.0 (fully complete)
     if instance.completion < 1.0:
         return
@@ -354,6 +361,12 @@ def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
     block_key = instance.block_key
     course_key = block_key.course_key
 
+    logger.info(
+        "[Milestones] Processing completion for user %s in course %s",
+        user.username,
+        course_key
+    )
+
     # Check if milestones are available and enabled
     try:
         from common.djangoapps.util import milestones_helpers
@@ -361,78 +374,66 @@ def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
         logger.warning("[Milestones] Milestones framework not available")
         return
 
-    if not milestones_helpers.is_prerequisite_courses_enabled():
+    prereqs_enabled = milestones_helpers.is_prerequisite_courses_enabled()
+    logger.debug("[Milestones] Prerequisites enabled: %s", prereqs_enabled)
+
+    if not prereqs_enabled:
         return
 
-    # Step 1: Check course completion
-    completion_percent = 0
-    try:
-        from lms.djangoapps.courseware.courses import get_course_blocks_completion_summary
+    # Check execution mode setting
+    from django.conf import settings
+    execution_mode = getattr(settings, 'LEARNING_PATHS_MILESTONE_MODE', 'async')
 
-        summary = get_course_blocks_completion_summary(course_key, user)
-        if summary:
-            complete_count = summary.get("complete_count", 0)
-            incomplete_count = summary.get("incomplete_count", 0)
-            locked_count = summary.get("locked_count", 0)
-            num_total_units = complete_count + incomplete_count + locked_count
+    logger.info(
+        "[Milestones] Execution mode: %s for user %s in course %s",
+        execution_mode,
+        user.username,
+        course_key
+    )
 
-            if num_total_units > 0:
-                completion_percent = round(complete_count / num_total_units, 2) * 100
+    if execution_mode == 'sync':
+        # Execute synchronously in Django process
+        try:
+            from learning_paths.tasks import check_and_fulfill_course_milestone
 
-    except Exception as e:
-        logger.error(
-            "[Milestones] Error checking completion for user %s in course %s: %s",
-            user.username, course_key, str(e)
-        )
-        return
+            result = check_and_fulfill_course_milestone(user.id, str(course_key))
 
-    # Step 2: Check if user has passing grade
-    has_passing_grade = False
-    grade_percent = 0
-    try:
-        from lms.djangoapps.grades.api import CourseGradeFactory
-        from openedx.core.djangoapps.content.course_overviews.api import get_course_overview_or_none
+            if result['success']:
+                logger.info(
+                    "[Milestones] Fulfilled milestone for user %s in course %s (completion: %.1f%%, grade: %.1f%%) [sync]",
+                    user.username,
+                    course_key,
+                    result['completion_percent'],
+                    result['grade_percent'],
+                )
+            else:
+                logger.debug(
+                    "[Milestones] Skipped milestone for user %s in course %s: %s [sync]",
+                    user.username, course_key, result['reason']
+                )
+        except Exception as e:
+            logger.error(
+                "[Milestones] Error in sync milestone check for user %s in course %s: %s",
+                user.username, course_key, str(e)
+            )
+    else:
+        # Execute asynchronously via Celery worker (default)
+        try:
+            from learning_paths.tasks import fulfill_course_milestone_task
 
-        course_overview = get_course_overview_or_none(course_key)
-        if course_overview:
-            course_grade = CourseGradeFactory().read(user, course_overview)
-            if course_grade:
-                grade_percent = course_grade.percent * 100
-                has_passing_grade = course_grade.passed
-
-    except Exception as e:
-        logger.error(
-            "[Milestones] Error checking grade for user %s in course %s: %s",
-            user.username, course_key, str(e)
-        )
-        return
-
-    # Step 3: Evaluate eligibility (require ≥95% completion AND passing grade)
-    MIN_COMPLETION_PERCENT = 95.0
-    if completion_percent < MIN_COMPLETION_PERCENT:
-        return
-
-    if not has_passing_grade:
-        return
-
-    # Step 4: Fulfill the milestone
-    # Note: The milestones framework handles duplicate fulfillment gracefully
-    try:
-        milestones_helpers.fulfill_course_milestone(course_key, user)
-        logger.info(
-            "[Milestones] Fulfilled milestone for user %s in course %s (completion: %.1f%%, grade: %.1f%%)",
-            user.username,
-            course_key,
-            completion_percent,
-            grade_percent,
-        )
-    except Exception as e:
-        logger.error(
-            "[Milestones] Error fulfilling milestone for user %s in course %s: %s",
-            user.username,
-            course_key,
-            str(e)
-        )
+            fulfill_course_milestone_task.apply_async(
+                args=[user.id, str(course_key)],
+                countdown=5,  # Wait 5 seconds to allow completion data to propagate
+            )
+            logger.info(
+                "[Milestones] Dispatched milestone task for user %s in course %s [async]",
+                user.username, course_key
+            )
+        except Exception as e:
+            logger.error(
+                "[Milestones] Error dispatching milestone task for user %s in course %s: %s",
+                user.username, course_key, str(e)
+            )
 
 
 # ============================================================================
