@@ -2,7 +2,10 @@
 Serializer for LearningPath.
 """
 
+import json
 from rest_framework import serializers
+from opaque_keys import InvalidKeyError
+from opaque_keys.edx.keys import CourseKey
 
 from learning_paths.models import (
     AcquiredSkill,
@@ -10,10 +13,12 @@ from learning_paths.models import (
     GroupCourseEnrollmentAudit,
     LearningPath,
     LearningPathEnrollment,
+    LearningPathGradingCriteria,
     LearningPathStep,
     RequiredSkill,
     Skill,
 )
+from learning_paths.keys import LearningPathKey
 
 DEFAULT_STATUS = "active"
 IMAGE_WIDTH = 1440
@@ -222,6 +227,232 @@ class GroupCourseAssignmentSerializer(serializers.ModelSerializer):
     def get_member_count(self, obj):
         """Get the number of users in the group."""
         return obj.group.user_set.count()
+
+
+class LearningPathWriteSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating and updating learning paths.
+    Handles multipart form data with JSON fields for nested relationships.
+    """
+
+    # Allow organization, path_number, path_run, path_group for key construction
+    organization = serializers.CharField(write_only=True, required=False)
+    path_number = serializers.CharField(write_only=True, required=False)
+    path_run = serializers.CharField(write_only=True, required=False)
+    path_group = serializers.CharField(write_only=True, required=False)
+
+    # JSON fields that come as strings in multipart form data
+    steps = serializers.CharField(required=False, allow_blank=True)
+    required_skills = serializers.CharField(required=False, allow_blank=True)
+    acquired_skills = serializers.CharField(required=False, allow_blank=True)
+
+    # Grading criteria fields
+    required_completion = serializers.FloatField(required=False)
+    required_grade = serializers.FloatField(required=False)
+
+    class Meta:
+        model = LearningPath
+        fields = [
+            "key",
+            "organization",
+            "path_number",
+            "path_run",
+            "path_group",
+            "display_name",
+            "subtitle",
+            "description",
+            "image",
+            "level",
+            "duration",
+            "time_commitment",
+            "sequential",
+            "invite_only",
+            "steps",
+            "required_skills",
+            "acquired_skills",
+            "required_completion",
+            "required_grade",
+        ]
+        extra_kwargs = {
+            "key": {"required": False},
+        }
+
+    def validate_steps(self, value):
+        """Parse and validate steps JSON."""
+        if not value:
+            return []
+        try:
+            steps = json.loads(value) if isinstance(value, str) else value
+            if not isinstance(steps, list):
+                raise serializers.ValidationError("Steps must be a list")
+            return steps
+        except json.JSONDecodeError:
+            raise serializers.ValidationError("Invalid JSON format for steps")
+
+    def validate_required_skills(self, value):
+        """Parse and validate required_skills JSON."""
+        if not value:
+            return []
+        try:
+            skills = json.loads(value) if isinstance(value, str) else value
+            if not isinstance(skills, list):
+                raise serializers.ValidationError("Required skills must be a list")
+            return skills
+        except json.JSONDecodeError:
+            raise serializers.ValidationError("Invalid JSON format for required_skills")
+
+    def validate_acquired_skills(self, value):
+        """Parse and validate acquired_skills JSON."""
+        if not value:
+            return []
+        try:
+            skills = json.loads(value) if isinstance(value, str) else value
+            if not isinstance(skills, list):
+                raise serializers.ValidationError("Acquired skills must be a list")
+            return skills
+        except json.JSONDecodeError:
+            raise serializers.ValidationError("Invalid JSON format for acquired_skills")
+
+    def validate(self, attrs):
+        """Validate and construct the learning path key if needed."""
+        # If key is not provided but key components are, construct the key
+        if not attrs.get("key"):
+            org = attrs.get("organization")
+            number = attrs.get("path_number")
+            run = attrs.get("path_run")
+            group = attrs.get("path_group", "default")
+
+            if org and number and run:
+                key_str = f"path-v1:{org}+{number}+{run}+{group}"
+                try:
+                    attrs["key"] = LearningPathKey.from_string(key_str)
+                except InvalidKeyError as exc:
+                    raise serializers.ValidationError({"key": f"Invalid learning path key format: {exc}"})
+            else:
+                raise serializers.ValidationError(
+                    "Either 'key' or 'organization', 'path_number', and 'path_run' must be provided"
+                )
+
+        return attrs
+
+    def create(self, validated_data):
+        """Create a learning path with nested relationships."""
+        # Extract nested data
+        steps_data = validated_data.pop("steps", [])
+        required_skills_data = validated_data.pop("required_skills", [])
+        acquired_skills_data = validated_data.pop("acquired_skills", [])
+        required_completion = validated_data.pop("required_completion", 80)
+        required_grade = validated_data.pop("required_grade", 75)
+
+        # Remove key construction fields
+        validated_data.pop("organization", None)
+        validated_data.pop("path_number", None)
+        validated_data.pop("path_run", None)
+        validated_data.pop("path_group", None)
+
+        # Create the learning path
+        learning_path = LearningPath.objects.create(**validated_data)
+
+        # Create or update grading criteria
+        LearningPathGradingCriteria.objects.update_or_create(
+            learning_path=learning_path,
+            defaults={
+                "required_completion": required_completion,
+                "required_grade": required_grade,
+            },
+        )
+
+        # Create steps
+        self._create_steps(learning_path, steps_data)
+
+        # Create skills
+        self._create_skills(learning_path, required_skills_data, RequiredSkill)
+        self._create_skills(learning_path, acquired_skills_data, AcquiredSkill)
+
+        return learning_path
+
+    def update(self, instance, validated_data):
+        """Update a learning path with nested relationships."""
+        # Extract nested data
+        steps_data = validated_data.pop("steps", None)
+        required_skills_data = validated_data.pop("required_skills", None)
+        acquired_skills_data = validated_data.pop("acquired_skills", None)
+        required_completion = validated_data.pop("required_completion", None)
+        required_grade = validated_data.pop("required_grade", None)
+
+        # Remove key construction fields
+        validated_data.pop("organization", None)
+        validated_data.pop("path_number", None)
+        validated_data.pop("path_run", None)
+        validated_data.pop("path_group", None)
+        validated_data.pop("key", None)  # Don't allow key updates
+
+        # Update basic fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        # Update grading criteria if provided
+        if required_completion is not None or required_grade is not None:
+            criteria, _ = LearningPathGradingCriteria.objects.get_or_create(learning_path=instance)
+            if required_completion is not None:
+                criteria.required_completion = required_completion
+            if required_grade is not None:
+                criteria.required_grade = required_grade
+            criteria.save()
+
+        # Update steps if provided
+        if steps_data is not None:
+            instance.steps.all().delete()
+            self._create_steps(instance, steps_data)
+
+        # Update skills if provided
+        if required_skills_data is not None:
+            instance.requiredskill_set.all().delete()
+            self._create_skills(instance, required_skills_data, RequiredSkill)
+
+        if acquired_skills_data is not None:
+            instance.acquiredskill_set.all().delete()
+            self._create_skills(instance, acquired_skills_data, AcquiredSkill)
+
+        return instance
+
+    def _create_steps(self, learning_path, steps_data):
+        """Create learning path steps from validated data."""
+        for step_data in steps_data:
+            course_key_str = step_data.get("course_key")
+            if not course_key_str:
+                continue
+
+            try:
+                course_key = CourseKey.from_string(course_key_str)
+            except InvalidKeyError:
+                # Skip invalid course keys
+                continue
+
+            LearningPathStep.objects.create(
+                learning_path=learning_path,
+                course_key=course_key,
+                order=step_data.get("order", 1),
+                weight=step_data.get("weight", 1.0),
+            )
+
+    def _create_skills(self, learning_path, skills_data, skill_model):
+        """Create skills (required or acquired) from validated data."""
+        for skill_data in skills_data:
+            skill_name = skill_data.get("skill") or skill_data.get("display_name")
+            if not skill_name:
+                continue
+
+            # Get or create the skill
+            skill, _ = Skill.objects.get_or_create(display_name=skill_name)
+
+            # Create the relationship
+            skill_model.objects.create(
+                learning_path=learning_path,
+                skill=skill,
+                level=skill_data.get("level"),
+            )
 
 
 class GroupCourseEnrollmentAuditSerializer(serializers.ModelSerializer):

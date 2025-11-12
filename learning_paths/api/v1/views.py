@@ -29,6 +29,7 @@ from learning_paths.api.v1.serializers import (
     LearningPathGradeSerializer,
     LearningPathListSerializer,
     LearningPathProgressSerializer,
+    LearningPathWriteSerializer,
 )
 from learning_paths.compat import enroll_user_in_course
 from learning_paths.keys import LearningPathKey
@@ -143,21 +144,38 @@ class LearningPathUserGradeView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class LearningPathViewSet(viewsets.ReadOnlyModelViewSet):
+class LearningPathViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for listing all learning paths and retrieving a specific learning path's details,
-    including steps and associated skills.
+    ViewSet for managing learning paths.
+
+    - List and retrieve: Available to authenticated users (respecting visibility rules)
+    - Create, update, delete: Available to admin users only
     """
 
-    permission_classes = (IsAuthenticated,)
     pagination_class = PageNumberPagination
     lookup_field = "key"
+
+    def get_permissions(self):
+        """
+        Set permissions based on action.
+        - Read operations (list, retrieve): IsAuthenticated
+        - Write operations (create, update, partial_update, destroy): IsAdminUser
+        """
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [IsAdminUser()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         """
         Get all learning paths and prefetch the related data.
         """
         user = self.request.user
+
+        # For write operations, admins should see all paths
+        if self.action in ["update", "partial_update", "destroy"] and user.is_staff:
+            return LearningPath.objects.all().prefetch_related("steps", "grading_criteria")
+
+        # For read operations, use visibility rules
         queryset = LearningPath.objects.get_paths_visible_to_user(user).prefetch_related(
             "steps",
             "grading_criteria",
@@ -165,7 +183,12 @@ class LearningPathViewSet(viewsets.ReadOnlyModelViewSet):
         return queryset
 
     def get_serializer_class(self):
-        if self.action == "list":
+        """
+        Use different serializers for different actions.
+        """
+        if self.action in ["create", "update", "partial_update"]:
+            return LearningPathWriteSerializer
+        elif self.action == "list":
             return LearningPathListSerializer
         return LearningPathDetailSerializer
 
