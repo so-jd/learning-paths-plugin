@@ -8,7 +8,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.core.validators import validate_email
-from django.db.models import QuerySet
+from django.db.models import Count, QuerySet
 from django.shortcuts import get_object_or_404
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey
@@ -230,7 +230,10 @@ class LearningPathEnrollmentView(APIView):
         """
         learning_path = self._get_learning_path(learning_path_key_str)
 
-        enrollments = LearningPathEnrollment.objects.filter(learning_path=learning_path, is_active=True)
+        enrollments = LearningPathEnrollment.objects.filter(
+            learning_path=learning_path,
+            is_active=True
+        ).select_related('user', 'learning_path')
 
         if request.user.is_staff:
             if username := request.query_params.get("username"):
@@ -238,8 +241,25 @@ class LearningPathEnrollmentView(APIView):
         else:
             enrollments = enrollments.filter(user=request.user)
 
-        serializer = LearningPathEnrollmentSerializer(enrollments.all(), many=True)
-        return Response(serializer.data)
+        # Manually construct the response with user details
+        data = []
+        for enrollment in enrollments:
+            data.append({
+                'user': {
+                    'id': enrollment.user.id,
+                    'username': enrollment.user.username,
+                    'email': enrollment.user.email,
+                },
+                'learning_path': {
+                    'id': enrollment.learning_path.id,
+                    'key': str(enrollment.learning_path.key),
+                    'display_name': enrollment.learning_path.display_name,
+                },
+                'is_active': enrollment.is_active,
+                'created': enrollment.created,
+            })
+
+        return Response(data)
 
     def post(self, request, learning_path_key_str: str):
         """Enroll learners in Learning Paths.
@@ -307,7 +327,7 @@ class LearningPathEnrollmentView(APIView):
         )
 
 
-class ListEnrollmentsView(generics.ListAPIView):
+class ListEnrollmentsView(APIView):
     """
     List Learning Path Enrollments.
 
@@ -316,9 +336,36 @@ class ListEnrollmentsView(generics.ListAPIView):
     """
 
     permission_classes = [IsAuthenticated]
-    queryset = LearningPathEnrollment.objects.all()
-    serializer_class = LearningPathEnrollmentSerializer
-    filter_backends = [AdminOrSelfFilterBackend]
+
+    def get(self, request):
+        """Get enrollments with full user and learning path details."""
+        enrollments = LearningPathEnrollment.objects.select_related('user', 'learning_path').all()
+
+        # Filter based on user role
+        if not request.user.is_staff:
+            enrollments = enrollments.filter(user=request.user)
+        elif username := request.query_params.get("username"):
+            enrollments = enrollments.filter(user__username=username)
+
+        # Manually construct the response with user details
+        data = []
+        for enrollment in enrollments:
+            data.append({
+                'user': {
+                    'id': enrollment.user.id,
+                    'username': enrollment.user.username,
+                    'email': enrollment.user.email,
+                },
+                'learning_path': {
+                    'id': enrollment.learning_path.id,
+                    'key': str(enrollment.learning_path.key),
+                    'display_name': enrollment.learning_path.display_name,
+                },
+                'is_active': enrollment.is_active,
+                'created': enrollment.created,
+            })
+
+        return Response(data)
 
 
 class BulkEnrollView(APIView):
@@ -329,13 +376,35 @@ class BulkEnrollView(APIView):
     permission_classes = [IsAdminUser]
 
     @staticmethod
-    def _process_input_data(request: Request) -> tuple[list[str], list[str]]:
+    def _process_input_data(request: Request) -> tuple[list[str], list[str], list[int]]:
         """Extract and validate input data from request."""
+        from django.contrib.auth.models import Group
+
         data = request.data
         learning_paths_keys = data.get("learning_paths", "").split(",")
-        emails = data.get("emails", "").split(",")
+        emails_str = data.get("emails", "")
+        group_ids_str = data.get("group_ids", "")
 
-        return learning_paths_keys, emails
+        emails = emails_str.split(",") if emails_str else []
+
+        # Parse group IDs
+        group_ids = []
+        if group_ids_str:
+            try:
+                group_ids = [int(gid.strip()) for gid in group_ids_str.split(",") if gid.strip()]
+            except ValueError:
+                logger.warning("BulkEnrollView: Invalid group_ids format")
+
+        # Fetch emails from groups
+        if group_ids:
+            groups = Group.objects.filter(id__in=group_ids).prefetch_related("user_set")
+            group_user_emails = []
+            for group in groups:
+                group_user_emails.extend(group.user_set.values_list("email", flat=True))
+            # Combine emails from input and groups, removing duplicates
+            emails = list(set(list(emails) + group_user_emails))
+
+        return learning_paths_keys, emails, group_ids
 
     @staticmethod
     def _validate_learning_paths(learning_paths_keys: list[str]) -> QuerySet[LearningPath]:
@@ -363,7 +432,7 @@ class BulkEnrollView(APIView):
 
     def _setup_bulk_operation(self, request: Request) -> tuple[QuerySet[LearningPath], QuerySet[User], list[str]]:
         """Common setup for bulk operations."""
-        learning_paths_keys, emails = self._process_input_data(request)
+        learning_paths_keys, emails, group_ids = self._process_input_data(request)
         learning_paths = self._validate_learning_paths(learning_paths_keys)
         existing_users = User.objects.filter(email__in=emails)
 
@@ -381,16 +450,21 @@ class BulkEnrollView(APIView):
             {
                 "learning_paths": "learning_path_1,learning_path_2",
                 "emails": "user_1@example.com,user_2@example.com",
+                "group_ids": "1,2,3",
                 "reason": "Bulk enrollment for new cohort",
                 "org": "organization_name",
                 "role": "student"
             }
 
         `learning_paths` (str): A comma separated list of learning path IDs.
-        `emails` (str): A comma separated list of email addresses.
+        `emails` (str, optional): A comma separated list of email addresses.
+        `group_ids` (str, optional): A comma separated list of Django Group IDs.
         `reason` (str, optional): Reason for enrollment, used for audit.
         `org` (str, optional): Organization identifier, used for audit.
         `role` (str, optional): User role, used for audit.
+
+        Note: You can provide emails, group_ids, or both. All members from specified groups
+        will be enrolled along with any individually specified email addresses.
 
         * For existing users, it creates a new LearningPathEnrollment record, automatically
           enrolling them in the learning path. It also creates a LearningPathAllowed record
@@ -465,16 +539,21 @@ class BulkEnrollView(APIView):
             {
                 "learning_paths": "learning_path_1,learning_path_2",
                 "emails": "user_1@example.com,user_2@example.com",
+                "group_ids": "1,2,3",
                 "reason": "End of semester cleanup",
                 "org": "organization_name",
                 "role": "student"
             }
 
         `learning_paths` (str): A comma separated list of learning path IDs.
-        `emails` (str): A comma separated list of email addresses.
+        `emails` (str, optional): A comma separated list of email addresses.
+        `group_ids` (str, optional): A comma separated list of Django Group IDs.
         `reason` (str, optional): Reason for unenrollment, used for audit.
         `org` (str, optional): Organization identifier, used for audit.
         `role` (str, optional): User role, used for audit.
+
+        Note: You can provide emails, group_ids, or both. All members from specified groups
+        will be unenrolled along with any individually specified email addresses.
 
         * For existing users, it deactivates their LearningPathEnrollment records.
         * For emails with active LearningPathEnrollmentAllowed records, it deactivates those records.
@@ -530,6 +609,38 @@ class BulkEnrollView(APIView):
             },
             status=status.HTTP_204_NO_CONTENT,
         )
+
+
+class GroupsListView(generics.ListAPIView):
+    """
+    List all Django groups for bulk enrollment purposes.
+
+    Returns a list of all available Django Auth Groups that can be used
+    for bulk enrollment in learning paths.
+
+    Permissions: Admin users only
+    """
+
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, *args, **kwargs):
+        """List all groups with their ID, name, and member count."""
+        from django.contrib.auth.models import Group
+
+        groups = Group.objects.all().annotate(
+            member_count=Count('user')
+        ).order_by('name')
+
+        data = [
+            {
+                'id': group.id,
+                'name': group.name,
+                'member_count': group.member_count,
+            }
+            for group in groups
+        ]
+
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class LearningPathCourseEnrollmentView(APIView):

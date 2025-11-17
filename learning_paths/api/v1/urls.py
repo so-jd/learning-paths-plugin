@@ -9,6 +9,7 @@ from learning_paths.api.v1.views import (
     BulkEnrollView,
     CoursePrerequisitesView,
     GroupCourseAssignmentViewSet,
+    GroupsListView,
     LearningPathAsProgramViewSet,
     LearningPathCourseEnrollmentView,
     LearningPathEnrollmentView,
@@ -50,6 +51,11 @@ urlpatterns = router.urls + [
         "enrollments/bulk-enroll/",
         BulkEnrollView.as_view(),
         name="bulk-enroll",
+    ),
+    path(
+        "groups/",
+        GroupsListView.as_view(),
+        name="groups-list",
     ),
     re_path(
         rf"{LEARNING_PATH_URL_PATTERN}/enrollments/{COURSE_KEY_URL_PATTERN}/",
