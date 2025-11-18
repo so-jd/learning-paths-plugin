@@ -3,23 +3,31 @@
 from django.urls import path, re_path
 from rest_framework import routers
 
-from learning_paths.api.v1.views import (
-    AllObjectTagsView,
-    BulkEnrollGroupToCourseView,
-    BulkEnrollView,
-    CoursePrerequisitesView,
-    GroupCourseAssignmentViewSet,
-    GroupsListView,
+# Import views from feature modules
+from learning_paths.api.v1.learning_paths import (
     LearningPathAsProgramViewSet,
-    LearningPathCertificateStatusView,
-    LearningPathCourseEnrollmentView,
-    LearningPathEnrollmentView,
+    LearningPathViewSet,
+)
+from learning_paths.api.v1.progress import (
     LearningPathUserGradeView,
     LearningPathUserProgressView,
-    LearningPathViewSet,
+)
+from learning_paths.api.v1.enrollments import (
+    BulkEnrollView,
+    GroupsListView,
+    LearningPathCourseEnrollmentView,
+    LearningPathEnrollmentView,
     ListEnrollmentsView,
+)
+from learning_paths.api.v1.groups import (
+    BulkEnrollGroupToCourseView,
+    GroupCourseAssignmentViewSet,
     SyncGroupEnrollmentsView,
 )
+from learning_paths.api.v1.certificates import LearningPathCertificateStatusView
+from learning_paths.api.v1.prerequisites import CoursePrerequisitesView
+from learning_paths.api.v1.integration import AllObjectTagsView
+
 from learning_paths.keys import COURSE_KEY_URL_PATTERN, LEARNING_PATH_URL_PATTERN
 
 router = routers.SimpleRouter()
