@@ -162,3 +162,178 @@ def fulfill_course_milestone_task(self, user_id, course_key_str):
             self.max_retries,
         )
         raise
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_kwargs={'max_retries': 3, 'countdown': 60},
+    retry_backoff=True,
+)
+def generate_learning_path_credential(self, user_id, learning_path_key_str, completion_data=None):
+    """
+    Generate a certificate/credential for a completed learning path.
+
+    This task calls the Credentials service API to issue a ProgramCertificate
+    for a learning path. The learning path's UUID is used as the program_uuid.
+
+    The Credentials service's ProgramCertificateIssuer will:
+    - Create or update a UserCredential record
+    - Send a congratulatory email to the learner
+    - Emit OpenEdX events (PROGRAM_CERTIFICATE_AWARDED)
+    - Send Segment analytics events
+    - Update program completion records
+
+    Args:
+        user_id (int): The ID of the user who completed the learning path
+        learning_path_key_str (str): String representation of the learning path key
+        completion_data (dict, optional): Completion and grade data. If not provided,
+            it will be calculated. Expected keys:
+            - progress (float): Completion percentage (0.0-1.0)
+            - grade (float): Weighted grade (0.0-1.0)
+
+    Returns:
+        dict: Result from the Credentials service API
+
+    Raises:
+        Exception: If credential generation fails (will be retried up to 3 times)
+    """
+    import requests
+    from django.conf import settings
+    from django.contrib.auth import get_user_model
+    from learning_paths.models import LearningPath
+    from learning_paths.keys import LearningPathKey
+    from learning_paths.credentials import (
+        check_learning_path_completion_for_credential,
+        check_if_credential_already_exists,
+    )
+
+    User = get_user_model()
+
+    try:
+        # Get user and learning path
+        user = User.objects.get(id=user_id)
+        learning_path_key = LearningPathKey.from_string(learning_path_key_str)
+        learning_path = LearningPath.objects.get(key=learning_path_key)
+
+        logger.info(
+            "[Credentials Task] Processing certificate generation for user %s in learning path %s",
+            user.username,
+            learning_path_key_str,
+        )
+
+        # Check if credential already exists
+        if check_if_credential_already_exists(user.username, learning_path.uuid):
+            logger.info(
+                "[Credentials Task] Certificate already exists for user %s in learning path %s. Skipping.",
+                user.username,
+                learning_path_key_str,
+            )
+            return {
+                'success': True,
+                'reason': 'already_exists',
+                'username': user.username,
+                'learning_path_key': learning_path_key_str,
+            }
+
+        # If completion_data not provided, calculate it
+        if completion_data is None:
+            eligible, completion_data = check_learning_path_completion_for_credential(user, learning_path)
+
+            if not eligible:
+                logger.warning(
+                    "[Credentials Task] User %s is not eligible for certificate in %s: %s",
+                    user.username,
+                    learning_path_key_str,
+                    completion_data.get('reason', 'unknown'),
+                )
+                return {
+                    'success': False,
+                    'reason': completion_data.get('reason', 'not_eligible'),
+                    'username': user.username,
+                    'learning_path_key': learning_path_key_str,
+                    'data': completion_data,
+                }
+
+        # Prepare credential data for Credentials service API
+        credential_data = {
+            "credential": {
+                "type": "program",
+                "program_uuid": str(learning_path.uuid)
+            },
+            "username": user.username,
+            "status": "awarded",
+            "attributes": [
+                {
+                    "name": "completion_percent",
+                    "value": str(round(completion_data.get('progress', 0) * 100, 2))
+                },
+                {
+                    "name": "grade_percent",
+                    "value": str(round(completion_data.get('grade', 0) * 100, 2))
+                },
+                {
+                    "name": "learning_path_key",
+                    "value": learning_path_key_str
+                },
+                {
+                    "name": "learning_path_name",
+                    "value": learning_path.display_name
+                }
+            ],
+            "lms_user_id": user.id
+        }
+
+        # Get Credentials service URL and authentication
+        credentials_api_url = getattr(settings, 'CREDENTIALS_SERVICE_URL', settings.LMS_ROOT_URL)
+        credentials_api_url = f"{credentials_api_url}/api/v2/credentials/"
+
+        # Call Credentials service API
+        # Note: Service-to-service authentication will be handled by Django session/cookies
+        # or OAuth2 token depending on your Open edX configuration
+        response = requests.post(
+            credentials_api_url,
+            json=credential_data,
+            timeout=30,
+        )
+
+        # Check response
+        if response.status_code in [200, 201]:
+            result_data = response.json()
+            logger.info(
+                "[Credentials Task] Successfully generated certificate for user %s in learning path %s "
+                "(UUID: %s, completion: %.2f%%, grade: %.2f%%)",
+                user.username,
+                learning_path_key_str,
+                result_data.get('uuid', 'unknown'),
+                completion_data.get('progress', 0) * 100,
+                completion_data.get('grade', 0) * 100,
+            )
+            return {
+                'success': True,
+                'reason': 'credential_generated',
+                'username': user.username,
+                'learning_path_key': learning_path_key_str,
+                'credential_uuid': result_data.get('uuid'),
+                'data': completion_data,
+            }
+        else:
+            error_msg = f"HTTP {response.status_code}: {response.text}"
+            logger.error(
+                "[Credentials Task] Failed to generate certificate for user %s in learning path %s: %s",
+                user.username,
+                learning_path_key_str,
+                error_msg,
+            )
+            raise Exception(f"Credentials API returned error: {error_msg}")
+
+    except Exception as e:
+        logger.error(
+            "[Credentials Task] Task failed for user_id=%s, learning_path=%s: %s (attempt %s/%s)",
+            user_id,
+            learning_path_key_str,
+            str(e),
+            self.request.retries + 1,
+            self.max_retries,
+        )
+        raise

@@ -494,6 +494,10 @@ def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
             transaction.on_commit(
                 lambda: _execute_milestone_check_sync(user_id, course_key_str)
             )
+            # Also check for learning path certificate eligibility
+            transaction.on_commit(
+                lambda: trigger_credential_check_after_milestone(user_id, course_key_str)
+            )
             logger.debug(
                 "[Milestones] Registered on_commit callback for sync milestone check "
                 "(user: %s, course: %s)",
@@ -521,6 +525,8 @@ def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
                         result['completion_percent'],
                         result['grade_percent'],
                     )
+                    # Also check for learning path credentials
+                    check_and_trigger_learning_path_credentials(user_id, course_key_str)
                 else:
                     logger.debug(
                         "[Milestones] Skipped milestone for user %s in course %s: %s [sync-legacy]",
@@ -542,6 +548,10 @@ def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
             # - Cleaner transactions (no message broker I/O during transaction)
             transaction.on_commit(
                 lambda: _enqueue_milestone_task_async(user_id, course_key_str)
+            )
+            # Also check for learning path certificate eligibility
+            transaction.on_commit(
+                lambda: trigger_credential_check_after_milestone(user_id, course_key_str)
             )
             logger.debug(
                 "[Milestones] Registered on_commit callback for async milestone task "
@@ -569,6 +579,9 @@ def fulfill_milestone_on_block_completion(sender, instance, created, **kwargs):
                     "[Milestones] Dispatched milestone task for user %s in course %s [async-legacy]",
                     user.username, course_key
                 )
+                # Also check for learning path credentials
+                # In legacy mode, we call this directly since transaction.on_commit is not available
+                check_and_trigger_learning_path_credentials(user_id, course_key_str)
             except Exception as e:
                 logger.error(
                     "[Milestones] Error dispatching milestone task for user %s in course %s: %s",
@@ -608,3 +621,137 @@ def connect_completion_signal():
 
 # Auto-connect the signal when this module is imported
 connect_completion_signal()
+
+
+# ============================================================================
+# Learning Path Certificate Generation
+# ============================================================================
+
+
+def check_and_trigger_learning_path_credentials(user_id, course_key_str):
+    """
+    Check if completing this course triggers any learning path certificate eligibility.
+
+    This function is called after a course is completed. It finds all learning paths
+    that contain this course and checks if the user has now completed the learning path
+    and met the grade requirements. If so, it triggers certificate generation.
+
+    Args:
+        user_id (int): The user ID who completed the course
+        course_key_str (str): String representation of the course key
+    """
+    from django.conf import settings
+    from django.contrib.auth import get_user_model
+    from opaque_keys.edx.keys import CourseKey
+    from learning_paths.models import LearningPath, LearningPathStep, LearningPathEnrollment
+    from learning_paths.credentials import check_learning_path_completion_for_credential
+
+    # Check if learning path credentials feature is enabled
+    if not getattr(settings, 'LEARNING_PATHS_ENABLE_CREDENTIALS', False):
+        logger.debug("[Credentials] Learning path credentials feature is disabled")
+        return
+
+    try:
+        User = get_user_model()
+        user = User.objects.get(id=user_id)
+        course_key = CourseKey.from_string(course_key_str)
+
+        # Find all learning paths that contain this course
+        learning_path_steps = LearningPathStep.objects.filter(course_key=course_key).select_related('learning_path')
+
+        if not learning_path_steps.exists():
+            logger.debug(
+                "[Credentials] Course %s is not part of any learning path. Skipping certificate check.",
+                course_key_str,
+            )
+            return
+
+        logger.info(
+            "[Credentials] Checking certificate eligibility for user %s after completing course %s "
+            "(found %d learning paths containing this course)",
+            user.username,
+            course_key_str,
+            learning_path_steps.count(),
+        )
+
+        # Check each learning path for completion
+        for step in learning_path_steps:
+            learning_path = step.learning_path
+
+            # Check if user is enrolled in this learning path
+            try:
+                enrollment = LearningPathEnrollment.objects.get(
+                    user=user,
+                    learning_path=learning_path,
+                    is_active=True,
+                )
+            except LearningPathEnrollment.DoesNotExist:
+                logger.debug(
+                    "[Credentials] User %s is not enrolled in learning path %s. Skipping.",
+                    user.username,
+                    learning_path.key,
+                )
+                continue
+
+            # Check if user is eligible for certificate
+            eligible, data = check_learning_path_completion_for_credential(user, learning_path)
+
+            if eligible:
+                logger.info(
+                    "[Credentials] User %s is eligible for certificate in learning path %s. "
+                    "Queueing certificate generation task.",
+                    user.username,
+                    learning_path.key,
+                )
+
+                # Queue the certificate generation task
+                from learning_paths.tasks import generate_learning_path_credential
+
+                generate_learning_path_credential.delay(
+                    user_id=user.id,
+                    learning_path_key_str=str(learning_path.key),
+                    completion_data=data,
+                )
+            else:
+                logger.debug(
+                    "[Credentials] User %s not yet eligible for certificate in learning path %s: %s "
+                    "(progress: %.2f/%.2f, grade: %.2f/%.2f)",
+                    user.username,
+                    learning_path.key,
+                    data.get('reason', 'unknown'),
+                    data.get('progress', 0),
+                    data.get('required_completion', 0),
+                    data.get('grade', 0),
+                    data.get('required_grade', 0),
+                )
+
+    except Exception as e:
+        logger.error(
+            "[Credentials] Error checking learning path credentials for user %s, course %s: %s",
+            user_id,
+            course_key_str,
+            str(e),
+        )
+
+
+def trigger_credential_check_after_milestone(user_id, course_key_str):
+    """
+    Callback to check learning path credentials after milestone fulfillment.
+
+    This function is designed to be called via transaction.on_commit() after
+    a course milestone is fulfilled, ensuring that all data is committed before
+    checking for learning path completion.
+
+    Args:
+        user_id (int): The user ID who completed the course
+        course_key_str (str): String representation of the course key
+    """
+    try:
+        check_and_trigger_learning_path_credentials(user_id, course_key_str)
+    except Exception as e:
+        logger.error(
+            "[Credentials] Error in on_commit credential check for user %s, course %s: %s",
+            user_id,
+            course_key_str,
+            str(e),
+        )

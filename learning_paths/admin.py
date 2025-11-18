@@ -291,7 +291,7 @@ class EnrollmentAllowedAuditInline(admin.TabularInline):
 
 
 @admin.register(LearningPathEnrollment)
-class EnrolledUsersAdmin(admin.ModelAdmin):
+class EnrolledUsersAdmin(DjangoObjectActions, admin.ModelAdmin):
     """Admin for Learning Path enrollment."""
 
     model = LearningPathEnrollment
@@ -319,6 +319,191 @@ class EnrolledUsersAdmin(admin.ModelAdmin):
         "learning_path__key",
         "learning_path__display_name",
     ]
+
+    change_actions = ("award_certificate", "revoke_certificate")
+    actions = ["award_certificates_to_selected", "revoke_certificates_from_selected"]
+
+    @action(label="Award Certificate", description="Manually award a learning path certificate to this user")
+    def award_certificate(self, request, obj: LearningPathEnrollment):
+        """
+        Manually award a learning path certificate to a specific user.
+
+        This action triggers certificate generation for the enrollment,
+        even if the user hasn't fully met completion/grade requirements.
+        Useful for special cases or manual overrides.
+        """
+        from learning_paths.tasks import generate_learning_path_credential
+
+        if not obj.is_active:
+            messages.error(request, f"Cannot award certificate: {obj.user.username} is not actively enrolled in {obj.learning_path.key}")
+            return
+
+        try:
+            # Trigger certificate generation task
+            result = generate_learning_path_credential.delay(
+                user_id=obj.user.id,
+                learning_path_key_str=str(obj.learning_path.key),
+                completion_data=None,  # Let the task calculate eligibility
+            )
+
+            messages.success(
+                request,
+                f"Certificate generation task queued for {obj.user.username} in {obj.learning_path.display_name}. "
+                f"Task ID: {result.id}"
+            )
+        except Exception as e:
+            messages.error(request, f"Failed to queue certificate generation: {str(e)}")
+
+    @action(label="Revoke Certificate", description="Revoke the learning path certificate for this user")
+    def revoke_certificate(self, request, obj: LearningPathEnrollment):
+        """
+        Revoke a learning path certificate for a specific user.
+
+        This action calls the Credentials service API to revoke (not delete)
+        the certificate, changing its status from 'awarded' to 'revoked'.
+        """
+        import requests
+        from django.conf import settings
+
+        try:
+            # Fetch the credential for this user and learning path
+            credentials_api_url = getattr(settings, 'CREDENTIALS_SERVICE_URL', settings.LMS_ROOT_URL)
+            list_url = f"{credentials_api_url}/api/v2/credentials/"
+
+            response = requests.get(
+                list_url,
+                params={
+                    'username': obj.user.username,
+                    'program_uuid': str(obj.learning_path.uuid),
+                    'status': 'awarded',
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if not data.get('results') or len(data['results']) == 0:
+                messages.warning(
+                    request,
+                    f"No awarded certificate found for {obj.user.username} in {obj.learning_path.display_name}"
+                )
+                return
+
+            credential = data['results'][0]
+            credential_uuid = credential['uuid']
+
+            # Revoke the credential
+            revoke_url = f"{credentials_api_url}/api/v2/credentials/{credential_uuid}/"
+            revoke_response = requests.patch(
+                revoke_url,
+                json={'status': 'revoked'},
+                timeout=10,
+            )
+            revoke_response.raise_for_status()
+
+            messages.success(
+                request,
+                f"Successfully revoked certificate for {obj.user.username} in {obj.learning_path.display_name}"
+            )
+
+        except requests.exceptions.HTTPError as e:
+            messages.error(request, f"HTTP error revoking certificate: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            messages.error(request, f"Network error revoking certificate: {str(e)}")
+        except Exception as e:
+            messages.error(request, f"Error revoking certificate: {str(e)}")
+
+    def award_certificates_to_selected(self, request, queryset):
+        """
+        Bulk action to award certificates to multiple selected enrollments.
+
+        This queues certificate generation tasks for all selected enrollments.
+        """
+        from learning_paths.tasks import generate_learning_path_credential
+
+        queued_count = 0
+        skipped_count = 0
+
+        for enrollment in queryset:
+            if not enrollment.is_active:
+                skipped_count += 1
+                continue
+
+            try:
+                generate_learning_path_credential.delay(
+                    user_id=enrollment.user.id,
+                    learning_path_key_str=str(enrollment.learning_path.key),
+                    completion_data=None,
+                )
+                queued_count += 1
+            except Exception:
+                skipped_count += 1
+
+        if queued_count > 0:
+            messages.success(request, f"Queued certificate generation for {queued_count} enrollment(s)")
+        if skipped_count > 0:
+            messages.warning(request, f"Skipped {skipped_count} enrollment(s) (inactive or error)")
+
+    award_certificates_to_selected.short_description = "Award certificates to selected enrollments"
+
+    def revoke_certificates_from_selected(self, request, queryset):
+        """
+        Bulk action to revoke certificates from multiple selected enrollments.
+
+        This revokes awarded certificates for all selected enrollments.
+        """
+        import requests
+        from django.conf import settings
+
+        revoked_count = 0
+        not_found_count = 0
+        error_count = 0
+
+        credentials_api_url = getattr(settings, 'CREDENTIALS_SERVICE_URL', settings.LMS_ROOT_URL)
+
+        for enrollment in queryset:
+            try:
+                # Fetch credential
+                list_url = f"{credentials_api_url}/api/v2/credentials/"
+                response = requests.get(
+                    list_url,
+                    params={
+                        'username': enrollment.user.username,
+                        'program_uuid': str(enrollment.learning_path.uuid),
+                        'status': 'awarded',
+                    },
+                    timeout=10,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                if not data.get('results') or len(data['results']) == 0:
+                    not_found_count += 1
+                    continue
+
+                credential_uuid = data['results'][0]['uuid']
+
+                # Revoke credential
+                revoke_url = f"{credentials_api_url}/api/v2/credentials/{credential_uuid}/"
+                revoke_response = requests.patch(
+                    revoke_url,
+                    json={'status': 'revoked'},
+                    timeout=10,
+                )
+                revoke_response.raise_for_status()
+                revoked_count += 1
+
+            except Exception:
+                error_count += 1
+
+        if revoked_count > 0:
+            messages.success(request, f"Successfully revoked {revoked_count} certificate(s)")
+        if not_found_count > 0:
+            messages.info(request, f"{not_found_count} enrollment(s) had no awarded certificate to revoke")
+        if error_count > 0:
+            messages.error(request, f"Failed to revoke {error_count} certificate(s)")
+
+    revoke_certificates_from_selected.short_description = "Revoke certificates from selected enrollments"
 
 
 @admin.register(LearningPathEnrollmentAllowed)

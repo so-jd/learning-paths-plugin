@@ -11,6 +11,7 @@ from learning_paths.api.v1.views import (
     GroupCourseAssignmentViewSet,
     GroupsListView,
     LearningPathAsProgramViewSet,
+    LearningPathCertificateStatusView,
     LearningPathCourseEnrollmentView,
     LearningPathEnrollmentView,
     LearningPathUserGradeView,
@@ -36,6 +37,11 @@ urlpatterns = router.urls + [
         rf"{LEARNING_PATH_URL_PATTERN}/grade/",
         LearningPathUserGradeView.as_view(),
         name="learning-path-grade",
+    ),
+    re_path(
+        rf"{LEARNING_PATH_URL_PATTERN}/certificate/",
+        LearningPathCertificateStatusView.as_view(),
+        name="learning-path-certificate",
     ),
     re_path(
         rf"{LEARNING_PATH_URL_PATTERN}/enrollments/$",
