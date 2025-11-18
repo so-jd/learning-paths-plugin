@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 
 from learning_paths.models import LearningPath
 
-from ..serializers import LearningPathGradeSerializer, LearningPathProgressSerializer
+from .serializers import LearningPathGradeSerializer, LearningPathProgressSerializer
 from ..utils import get_aggregate_progress
 
 logger = logging.getLogger(__name__)

@@ -29,7 +29,7 @@ from learning_paths.models import (
 )
 
 from ..permissions import IsAdminOrSelf
-from ..serializers import LearningPathEnrollmentSerializer
+from .serializers import LearningPathEnrollmentSerializer
 
 logger = logging.getLogger(__name__)
 

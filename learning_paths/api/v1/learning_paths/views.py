@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAdminUser, IsAuthenticated
 
 from learning_paths.models import LearningPath
 
-from ..serializers import (
+from .serializers import (
     LearningPathAsProgramSerializer,
     LearningPathDetailSerializer,
     LearningPathListSerializer,

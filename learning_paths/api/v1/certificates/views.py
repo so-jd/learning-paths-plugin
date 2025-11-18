@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 
 from learning_paths.models import LearningPath
 
-from ..serializers import LearningPathCertificateStatusSerializer
+from .serializers import LearningPathCertificateStatusSerializer
 
 logger = logging.getLogger(__name__)
 

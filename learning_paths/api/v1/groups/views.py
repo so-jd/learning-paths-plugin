@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 from learning_paths.compat import enroll_user_in_course
 from learning_paths.models import GroupCourseAssignment, GroupCourseEnrollmentAudit
 
-from ..serializers import GroupCourseAssignmentSerializer
+from .serializers import GroupCourseAssignmentSerializer
 
 logger = logging.getLogger(__name__)
 
