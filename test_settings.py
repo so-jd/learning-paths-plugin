@@ -32,14 +32,14 @@ INSTALLED_APPS = (
     "django.contrib.contenttypes",
     "django.contrib.messages",
     "django.contrib.sessions",
-    "core",
+    "learning_paths",
 )
 
 LOCALE_PATHS = [
-    root("core", "conf", "locale"),
+    root("learning_paths", "conf", "locale"),
 ]
 
-ROOT_URLCONF = "core.urls"
+ROOT_URLCONF = "learning_paths.urls"
 
 SECRET_KEY = "insecure-secret-key"
 

@@ -117,7 +117,7 @@ def is_requirement(line):
     return line and line.strip() and not line.startswith(("-r", "#", "-e", "git+", "-c"))
 
 
-VERSION = get_version("core", "__init__.py")
+VERSION = get_version("learning_paths", "__init__.py")
 
 if sys.argv[-1] == "tag":
     print("Tagging the version on github:")
@@ -137,15 +137,15 @@ setup(
     author_email="help@opencraft.com",
     url="https://github.com/open-craft/learning-paths-plugin",
     packages=find_packages(
-        include=["core", "core.*"],
+        include=["learning_paths", "learning_paths.*"],
         exclude=["*tests"],
     ),
     entry_points={
         "lms.djangoapp": [
-            "core = core.apps:CoreConfig",
+            "learning_paths = learning_paths.apps:LearningPathsConfig",
         ],
         "context_key": [
-            "path-v1 = core.keys:LearningPathKey",
+            "path-v1 = learning_paths.keys:LearningPathKey",
         ],
     },
     include_package_data=True,
